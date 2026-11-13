@@ -1,0 +1,317 @@
+---
+title: "prepare_data"
+output: html_document
+date: "2026-11-09"
+---
+
+# Environment Setup + Data Loading
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(tidyr)
+library(readxl)
+library(dataprep)
+library(easyr)
+
+source("./utils.R")
+```
+
+```{r cars}
+flock_files <- list.files(path = "../data",
+                          pattern = "*(Flock)*csv",
+                          full.names = TRUE,
+                          recursive = TRUE,
+                          ignore.case = FALSE)
+```
+
+```{r pressure, echo=FALSE}
+flock_df <- flock_files %>%
+            set_names() %>% 
+            map_dfr(.f = read.csv) %>% 
+            rename(Case = Case..) 
+```
+
+```{r}
+print("Number of rows in original combined dataset:")
+flock_df %>% 
+  nrow()
+```
+
+# Cleaning the dataset
+
+```{r}
+flock_df$ID <- trimws(flock_df$ID)
+
+flock_df$Name <- flock_df$Name %>% 
+  trimws() %>% 
+  toupper()
+
+flock_df$Org.Name <- flock_df$Org.Name %>% 
+  trimws() %>% 
+  toupper()
+
+flock_df$License.Plate <- flock_df$License.Plate %>% 
+  trimws() %>% 
+  replace_na(.,
+             replace="")
+
+flock_df$Reason <- flock_df$Reason %>% 
+  trimws() %>% 
+  replace_na(.,
+             replace="") %>% 
+  toupper()
+
+flock_df$Case <- flock_df$Case %>% 
+  trimws() %>% 
+  replace_na(.,
+             replace="")
+
+flock_df$Filters <- flock_df$Filters %>% 
+  trimws() %>% 
+  replace_na(.,
+             replace="")
+
+flock_df$Search.Type <- flock_df$Search.Type %>% 
+  trimws() %>% 
+  toupper(.)
+
+flock_df$Text.Prompt <- flock_df$Text.Prompt %>% 
+  trimws() %>% 
+  toupper() %>% 
+  replace_na(., 
+             replace="")
+
+flock_df$Moderation <- flock_df$Moderation %>% 
+  trimws() %>% 
+  toupper() %>% 
+  replace_na(.,
+             replace="")
+```
+
+# Basic deduplication
+
+```{r}
+# de-duplicate / clean the data
+# first round of de-duplication: clear copies (all rows are the same)
+flock_df <- unique(flock_df)
+```
+
+```{r}
+print("After removing exact duplicates:")
+flock_df %>% 
+  nrow()
+```
+
+# Exploration of data
+
+## Checking 2024 data
+
+The 2024 subset of data has no IDs for each row, so we must rely on other columns as indicators for duplicates.
+
+```{r}
+flock_df %>% 
+  filter(grepl("/2024,", Search.Time)) %>%
+  sample_n(25)
+```
+
+The results from the cell below indicate that there are no Names that are redacted from the 2024 data, but there are 43,278 Organization Names that are not supplied.
+
+```{r}
+flock_df %>% 
+  filter(grepl("/2024,", Search.Time)) %>%
+  select(Name) %>% 
+  filter(is.na(Name)) %>% 
+  count()
+
+flock_df %>% 
+  filter(grepl("/2024,", Search.Time)) %>%
+  select(Name) %>% 
+  filter(Name == "***") %>% 
+  count()
+
+flock_df %>% 
+  filter(grepl("/2024,", Search.Time)) %>%
+  select(Org.Name) %>% 
+  filter(is.na(Org.Name)) %>% 
+  count()
+```
+
+## Checking 2025/2026 data
+
+We do this distinction, BTW, because there is a clear pattern of no IDs being supplied before this time period.
+
+```{r}
+flock_df_post_24 <- flock_df %>% 
+  filter(grepl("/202(5|6),", Search.Time)) 
+
+flock_df_post_24 %>% 
+  sample_n(25)
+```
+
+Within the unique IDs post 2024, there do seem to be some duplicates (although these could be NA matches, didn't do a thorough enough check).
+
+```{r}
+# within the unique IDs, are there any duplicates?
+sum(duplicated(flock_df_post_24[, "ID"]))
+```
+
+For the post-2024 period, are any of the Search.Times missing? No, which means it's a reliable column.
+
+```{r}
+flock_df %>% 
+  filter(grepl("/202(5|6),", Search.Time)) %>%
+  select(Search.Type) %>% 
+  filter(is.na(Search.Type)) %>% 
+  count()
+```
+
+Very basic matching on Search.Time indicates there might be a lot of duplicates, although it is more than possible (and probable) that plenty of these are because it's a huge national database. For example, two cops from different PDs can absolutely search int his database at the same time down to the second.
+
+```{r}
+# there's an error here
+sum(duplicated(flock_df_post_24[, "Search.Time"]))
+```
+
+Getting a little stricter, below we're printing out examples of rows in post-2024 data that match by both Search Time and Time Frame. Again, this doesn't necessarily mean they're automatically duplicates, especially if in the Flock API the time frame is something that doesn't have to be manually inserted, but rather more of a generic drop down.
+
+The result below shows that 16,329 rows display as possible duplicates. So let's investigate!
+
+```{r}
+flock_df %>% 
+  filter(grepl("/202(5|6),", Search.Time)) %>%
+  group_by(Search.Time,
+           Time.Frame) %>% 
+  mutate(n_dups = n()) %>% 
+  ungroup() %>% 
+  filter(n_dups > 2)
+```
+
+Ok, but what about adding more columns? We want to consider those that are essentially, to the human naked eye, considered to be a duplicate. Let's add more reasonable columns and see what's up.
+
+```{r}
+# is the above the same when I match by more columns?
+flock_df %>% 
+  filter(grepl("/202(5|6),", Search.Time)) %>%
+  group_by(Search.Time,
+           Time.Frame,
+           Search.Type,
+           Reason) %>% 
+  mutate(n_dups = n()) %>% 
+  ungroup() %>% 
+  filter(n_dups > 2)
+```
+
+Grabbing one of the examples from above, which claims to have **five** duplicates. From the results below, you can see that actually, this does look like the same exact search – all the information we've been provided is exactly the same, except for the unique ID. Ironically, the ID seems to be **too** unique.
+
+To maintain our standards, we will consider these the same!
+
+**NOTE: Technically, there is a world where these are five different searches. For example, in the case where one police officer is trying 5 different license plates in their search, something that is possible to submit all at once that then gets documented as 5 separate searches. We will, for now, still stand by this deduplication method, as it paints the most conservative picture we can.**
+
+```{r}
+flock_df %>% 
+  filter(Search.Time == "01/30/2026, 09:23:49 PM UTC")
+```
+
+Another example below. This is another one we'd consider a duplicate!
+
+```{r}
+flock_df %>% 
+  filter(Search.Time == "04/03/2026, 09:15:28 AM UTC",
+         Time.Frame == "04/01/2026, 09:30:17 AM UTC\n04/03/2026, 09:30:17 AM UTC")
+```
+
+There are some cases where a duplicate is found when matching by Search.Time and Time.Frame. Upon investigation, these are the same down to everything but the ID number (e.g., 01/30/2026, 09:23:49 PM UTC all coming from the NY State Police). In these cases, we will be conservative and actually consider them the same query coming from the same person, and therefore the same search.
+
+So then the question becomes, by what are we going to match? Definitely Time.Frame and Search.Time, as these are always reliably non-empty fields. We can't use IDs, because sometimes they're empty, and there are plenty of cases from above where even when they're different, we're going to be conservative and treat them as the same.
+
+## In conclusion
+
+At this point, I'm thinking of doing an OR match (Name \| Org.Name) & Search.Time & Time.Frame & Search.Type & Reason. But are there any rows in which both the Name and Org.Name are missing?
+
+- No, which is GREAT NEWS!
+
+```{r}
+flock_df %>% 
+  filter(is.na(Name), 
+         is.na(Org.Name)) %>% 
+  head()
+```
+
+# Deduplication plan
+
+We are going to perform the following deduplication: we are going to consider two rows duplicates if they match in the following columns:
+
+- Name, Search.Time, Time.Frame, Reason, Search.Type, OR
+
+- Org.Name, Search.Time, Time.Frame, Reason, Search.Type
+
+We have confirmed above that no rows has both Name and Org.Name redacted, so this should work.
+
+```{r}
+flock_df$dup1_check <- duplicated(flock_df[, c("Name", 
+                                         "Search.Time", 
+                                         "Time.Frame",
+                                         "Reason",
+                                         "Search.Type")])
+```
+
+```{r}
+flock_df$dup2_check <- duplicated(flock_df[, c("Org.Name", 
+                                               "Search.Time", 
+                                               "Time.Frame",
+                                               "Reason",
+                                               "Search.Type")])
+```
+
+```{r}
+flock_df <- flock_df %>% 
+  mutate(duplicate_likely = (dup1_check | dup2_check))
+```
+
+```{r}
+flock_df %>% 
+  filter(duplicate_likely == TRUE) %>% 
+  count()
+```
+
+```{r}
+# sanity check
+flock_df %>% 
+  filter(duplicate_likely == TRUE) %>% 
+  sample_n(10)
+```
+
+Below is a great example of our OR condition in action. One condition caught it (by the matching name), which means we can de-duplicate it!
+
+```{r}
+flock_df %>% 
+  filter(Search.Time == "1/24/2024, 01:46:38 PM UTC",
+         Time.Frame == "1/18/2024, 05:00:00 AM UTC\n1/19/2024, 04:59:00 AM UTC")
+```
+
+And this example is a good one to show why search time and time frame are not enough. Two officers from separate PDs ran a search at the same time!
+
+```{r}
+flock_df %>% 
+  filter(Search.Time == "1/6/2025, 04:19:02 PM UTC",
+         Time.Frame == "12/7/2024, 04:18:55 PM UTC\n1/6/2025, 04:18:55 PM UTC")
+```
+
+# Saving the file
+
+## Fixing the date column
+
+```{r}
+flock_df$Search.Time <- as.Date.character(flock_df$Search.Time,
+                                          format = "%m/%d/%Y")
+```
+
+## Saving the file
+
+```{r}
+# write to a csv file
+write.csv(flock_df,
+          file = "../data/flock_combined_24-26.csv",
+          row.names = FALSE)
+```
