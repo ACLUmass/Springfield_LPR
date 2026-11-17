@@ -1,0 +1,402 @@
+---
+title: "Flock Blog"
+output: html_document
+date: "2026-11-04"
+---
+
+# Environment setup + data cleaning
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(plotly)
+library(htmlwidgets)
+library(ggiraph)
+library(patchwork)
+library(sf)
+
+source("./utils.R")
+```
+
+Here, we're removing the duplicates from our analysis.
+
+```{r}
+flock_df <- read.csv("../data/flock_combined_24-26.csv") %>% 
+  filter(duplicate_likely == FALSE) %>% 
+  select(-dup1_check,
+         -dup2_check,
+         -duplicate_likely)
+
+nrow(flock_df)
+```
+
+```{r}
+# Step 1: extract the state data from Org.Name
+flock_df$state_pd <- sapply(flock_df$Org.Name, extract_state)
+```
+
+# Interactive Visualizations
+
+## Immigration searches over time
+
+### Entire dataset timeline
+
+NOTE: Make sure that it doesn't care about letter casing here.
+
+```{r}
+# filter out the immigration related stuff
+IMMIGRATION_KEYWORD <- "immigration|border( patrol)+|homeland security( investigation)+|WARRANT/FUGITIVE\\) - HSI|\\bi.c.e.\\b|\\busbp\bb|\\bcbp\\b"
+# IMMIGRATION_AGENCIES <- "border patrol|immigration|\\bi.c.e.\\b|\\busbp\\b|\\bcbp\\b"
+
+flock_immigration <- flock_df %>% 
+  mutate(immigration_search = grepl(IMMIGRATION_KEYWORD, Reason, ignore.case = TRUE)) %>% 
+         # immigration_agency = grepl(IMMIGRATION_AGENCIES, Org.Name, ignore.case = TRUE),
+         # immigration = (immigration_search | immigration_agency)) %>% 
+  filter(immigration_search == TRUE)
+```
+
+This plots the number of searches conducted per month over time for the immigration-related searches.
+```{r}
+time_hist <- flock_immigration %>% 
+  mutate(search_month_year = floor_date(as.Date(Search.Time), unit="month")) %>% 
+  group_by(search_month_year) %>% 
+  summarize(n_searches = n()) %>% 
+  ggplot(aes(x = search_month_year, y = n_searches)) +
+  scale_x_date(date_breaks = "3 months", date_labels = "%m %Y") +
+  ggtitle("Immigration-related searches of Springfield's Flock data") +
+  geom_col_interactive(fill = "dodgerblue3") +
+  theme(text = element_text(size=8),
+        axis.text.x = element_text(angle=45)) +
+  labs(x = "", y = "",
+       caption = "Immigration-related searches of Springfield’s Flock data, per month. \nSource: Flock Safety network audits for Springfield PD, January 2024 to October 2026, obtained by \nthe ACLU of Massachusetts under the Massachusetts Public Records Law.")
+
+# 2. Convert it into an interactive Plotly chart
+# interactive_chart <- ggplotly(time_hist)
+interactive_chart <- girafe(ggobj = time_hist)
+
+time_hist
+
+# 3. Export and download as a self-contained HTML file
+saveWidget(interactive_chart, file = "../figs/n_immigration_searches.html", selfcontained = TRUE)
+# htmltools::save_html(interactive_chart, "../figs/n_immigration_searches.html", selfcontained = TRUE)
+```
+
+## Searches geographically
+Next, let's work on the choropleth that maps out the states with access to this data.
+
+#### Pre 2026
+
+```{r}
+state_counts_pre_2026 <- flock_df %>% 
+  filter(!is.na(state_pd),
+         Org.Name != "Springfield MA PD",
+         Search.Time < as.Date("2026-01-01")) %>%
+  group_by(state_pd) %>% 
+  summarize(n_searches = n()) %>% 
+  arrange(desc(n_searches))
+```
+
+```{r}
+# Step 2: generate histogram 
+state_hist <- state_counts_pre_2026 %>% 
+  head(n=10) %>% 
+  ggplot(aes(x = reorder(state_pd, n_searches),
+             y = n_searches,
+             tooltip = paste(state_pd, ": ", n_searches),
+             data_id = n_searches)) +
+  geom_col_interactive(stat = "identity",
+                       fill = "steelblue2") +
+  coord_flip() + 
+  theme_minimal(base_size = 6) +
+  labs(title = "Top 10 states whose police searched Springfield's Flock data most, \nJan 2024 - Dec 2025",
+       x = "state",
+       y = "# of searches in database",
+       caption = "Searches of Springfield's Flock data by police in each state, excluding Springfield PD, Jan 2024 - Dec 2025. \nSource: Flock Safety network audits for Springfield PD, January 2025 to October 2026, \nobtained by the ACLU of Massachusetts Public Records Law.")
+
+state_hist
+```
+
+```{r}
+# Step 3: generate choropleth
+us_sf <- read_sf("../data/cb_2018_us_state_20m/cb_2018_us_state_20m.shp") %>% 
+  filter(STUSPS != "AK",
+         STUSPS != "HI",
+         STUSPS != "PR")
+
+state_sf_counts <- left_join(us_sf,
+                             state_counts_pre_2026,
+                             by = c("STUSPS" = "state_pd"))
+
+state_sf_counts$n_searches <- state_sf_counts$n_searches %>% 
+  replace_na(0)
+
+counts_map <- state_sf_counts %>% 
+  mutate(binned_counts = cut(n_searches,
+                             breaks = c(0, 500000, 1000000, 2000000),
+                             include.lowest = TRUE,
+                             labels = c("0 - 500,000", "500,000 - 1,000,000", "1,000,000 - 2,000,000"))) %>% 
+  ggplot() +
+  geom_sf(size=0.5) +
+  geom_sf_interactive(aes(fill = binned_counts,#n_searches,
+                          tooltip = paste(NAME, ": ", n_searches),
+                          data_id = n_searches)) + 
+  theme_void(base_size = 6) +
+  scale_fill_manual(
+    name = "# of searches, binned", # Optional: change legend title
+    values = c(
+      "0 - 500,000" = "slategray1",
+      "500,000 - 1,000,000" = "steelblue2",
+      "1,000,000 - 2,000,000" = "steelblue4"
+    )
+  ) +
+  labs(title = "Searches of Springfield's Flock data by police in each state, Jan 2024 - Dec 2025")
+
+counts_map
+```
+
+```{r}
+combined_plot <- counts_map + free(state_hist) + plot_layout(ncol = 1)
+
+interactive_plot <- girafe(ggobj = combined_plot)
+interactive_plot <- girafe_options(
+  interactive_plot,
+  opts_hover(css = "fill:orange;stroke:black;")
+)
+
+# save as an html widget
+saveWidget(interactive_plot, file = "../figs/state-pd-counts_pre_2026.html", selfcontained = TRUE)
+# htmltools::save_html(interactive_plot, "../figs/state-pd-counts_pre_2026.html", selfcontained = TRUE)
+```
+
+```{r}
+interactive_plot
+```
+
+# Fact-checking the prose
+
+Federal agencies searched Springfield’s Flock data directly, including Homeland Security Investigations (HSI), which is part of ICE, and the U.S. Border Patrol. 
+```{r}
+flock_df %>% 
+  filter(grepl("federal", Org.Name, ignore.case = TRUE)) %>% 
+  select(Org.Name) %>% 
+  unique()
+```
+
+Police nationwide searched Springfield’s Flock data nearly 1,500 times for reasons citing ICE, HSI, Customs and Border Protection, Border Patrol, or immigration.
+```{r}
+nrow(flock_immigration)
+```
+
+Police have used Flock to search for people, not just cars, in searches that reached Springfield’s cameras. 
+- "On April 8, 2026, the Providence, Rhode Island police department ran one such search that reached Springfield’s cameras. It was labeled “[people] lime green hoodie and green checkered pajama pants pushing scooter.”
+- There's a bigger picture here: they are actually able to get around Flock's moderation by simply changing the 'people' in the original search to 'vehicle'.
+```{r}
+flock_df %>% 
+  filter(Search.Time == as.Date("04-08-2026",
+                                format = "%m-%d-%Y"),
+         state_pd == "RI") %>% 
+  filter(grepl("lime green hoodie and green checkered pajama pants pushing scooter", Text.Prompt, ignore.case = TRUE))
+```
+
+Police nationwide, and Springfield officers themselves, have searched Springfield’s Flock data in connection with protests and political rallies. 
+```{r}
+flock_df %>% 
+  filter(grepl("protest|rally", Reason, ignore.case = TRUE)) %>% 
+  select(Org.Name) %>% 
+  unique()
+```
+
+Between January 2024 and early December 2025, agencies outside of Springfield searched Springfield’s Flock data more than 9 million times.
+```{r}
+sum(state_counts_pre_2026$n_searches)
+```
+
+Immigration-related searches of Springfield’s Flock data peaked in March 2025, with 4,305 searches by 220 agencies in 39 states.
+```{r}
+flock_immigration %>% 
+  filter(between(Search.Time, as.Date("2025-03-01"), as.Date("2025-03-31"))) %>% 
+  select(state_pd) %>% 
+  unique() %>% 
+  count()
+```
+
+
+Homeland Security Investigations account ran 172 searches between March and May. 
+```{r}
+flock_df %>% 
+  filter(between(Search.Time, as.Date("2025-03-01"), as.Date("2025-05-31")),
+         grepl("Homeland Security Investigation", Org.Name, ignore.case = TRUE)) %>% 
+  count()
+```
+
+U.S. Border Patrol accounts ran 201 searches in May and June. 
+```{r}
+flock_df %>% 
+  filter(between(Search.Time, as.Date("2025-05-01"), as.Date("2025-06-30")),
+         grepl("Border Patrol", Org.Name, ignore.case = TRUE)) %>% 
+  count()
+```
+
+The Naval Criminal Investigative Service ran 123. 
+```{r}
+flock_df %>% 
+  filter(between(Search.Time, as.Date("2025-01-01"), as.Date("2025-12-31")),
+         grepl("Naval Criminal Investigative Service", Org.Name, ignore.case = TRUE)) %>% 
+  count()
+```
+In 2026, there were XXX searches from New England and New York that referenced HSI.
+```{r}
+flock_df %>% 
+  filter(grepl("\\bhsi\\b|homeland security", Reason, ignore.case = TRUE),
+         Search.Time > as.Date("2026-01-01")) %>% 
+  select(state_pd) %>% 
+  unique()
+```
+
+```{r}
+flock_df %>% 
+  filter(Search.Time > as.Date("2026-01-01"),
+         grepl("\\bhsi\\b|homeland security", 
+               Reason, 
+               ignore.case = TRUE)) %>% 
+  count()
+```
+
+The U.S. Postal Inspection Service has searched Springfield’s data more than 70,000 times since 2024, including through October 2026.
+```{r}
+flock_df %>% 
+  filter(grepl("Postal Inspection Service", Org.Name, ignore.case = TRUE)) %>% 
+  count()
+```
+```{r}
+flock_df %>% 
+  filter(grepl("Postal Inspection Service", Org.Name, ignore.case = TRUE)) %>% 
+  select(Search.Time) %>% 
+  unique()
+```
+
+
+Police in Braintree, Massachusetts; Nashua, New Hampshire N.H.; and Norwalk, Connecticut. ran similar searches for people between October 2025 and June 2026. 
+- this is correct
+```{r}
+people_searches %>% 
+  filter(Text.Prompt != "", 
+         !is.na(Text.Prompt), 
+         grepl("person|people", Text.Prompt)) %>% 
+  select(Org.Name, Text.Prompt)
+```
+
+Between January 2024 and early October 2026, agencies outside of Springfield searched Springfield’s Flock data more than 10.5 million times, mining information collected by Springfield’s dozens of Flock cameras.
+```{r}
+flock_df %>% 
+  filter(!grepl("Springfield", Org.Name, ignore.case = TRUE)) %>% 
+  count()
+```
+In 2025 alone, police in Texas searched Springfield’s Flock data more than 1.1 million times. 
+```{r}
+flock_df %>% 
+  filter(between(Search.Time, as.Date("2025-01-01"), as.Date("2026-12-31")),
+         state_pd == "TX") %>% 
+  count()
+```
+Police in Florida, where state law requires local law enforcement to take part in civil immigration enforcement, searched the records more than 425,000 times. 
+```{r}
+flock_df %>% 
+  filter(between(Search.Time, as.Date("2025-01-01"), as.Date("2026-21-31")),
+         state_pd == "FL") %>% 
+  count()
+```
+
+Those nationwide lookups stopped around February 10, 2026, and most outside searches since then have come from New England and New York. 
+```{r}
+flock_df %>% 
+  filter(state_pd != "MA") %>% 
+  ggplot(aes(x = floor_date(Search.Time, unit = "month"))) +
+  geom_bar()
+```
+
+```{r}
+flock_df %>% 
+  filter(state_pd != "MA",
+         Search.Time > as.Date("2026-02-10")) %>% 
+  group_by(state_pd) %>% 
+  summarize(count = n()) 
+```
+The most recent search explicitly naming ICE’s deportation operations was conducted on July 10, 2026, at 7:39 a.m. by an officer with the Barnstable, Massachusetts police department. In the reason field, the officer wrote “Wanted Person (Arrest Warrant/Fugitive) – warrants/ERO.” It wasn’t the first time: on November 2, 2025, Barnstable police ran five searches with the reason “Ero.”
+- both are correct
+```{r}
+flock_ero <- flock_df %>% 
+  filter(grepl("ERO", Reason, ignore.case = TRUE)) %>% 
+  arrange(Search.Time)
+```
+
+More recently, in September 2026, two New York agencies searched Springfield’s Flock data for reasons citing HSI. They were among thousands of HSI-related searches in Springfield’s audits.
+```{r}
+flock_df %>% 
+  filter(grepl("homeland security|hsi", Reason, ignore.case = TRUE)) %>% 
+  count()
+```
+Immigration-related searches of Springfield’s Flock data peaked in March 2025, with 4,884 searches by 250 agencies in 42 states.
+- it's actually 4,305 searches, 220 agencies, 39 states
+```{r}
+flock_immigration_2026 %>% 
+  filter(between(as.Date("2025-03-01"), as.Date("2025-03-31"), Search.Time), #between(Search.Time, as.Date("2025-01-01"), as.Date("2026-01-01")),
+         !is.na(state_pd)) %>% 
+  select(state_pd) %>%
+  unique() %>%
+  nrow()
+  # summarize(n_searches = nrow(.),
+  #           n_agencies = nrow(unique(Org.Name)),
+  #           n_states = nrow(unique(state_pd)))
+```
+
+Searches naming immigration-related keywords declined sharply after February 2026, but HSI-related searches continued at about 50 a month through the summer.
+```{r}
+flock_df %>% 
+  filter(Search.Time >= as.Date("2026-03-01"),
+         grepl(IMMIGRATION_KEYWORD, Reason, ignore.case = TRUE)) %>% 
+  mutate(month_time = floor_date(Search.Time, unit = "month")) %>% 
+  group_by(month_time) %>% 
+  count()
+```
+
+Between January 2024 and early October 2026, police searched Springfield’s Flock data more than 140 times in connection with protests or political rallies.
+```{r}
+flock_df %>% 
+  filter(grepl("protest|rally", Reason, ignore.case = TRUE)) %>% 
+  count()
+```
+In a single day, July 4, 2025, the Lubbock, Texas police department ran 54 searches labeled “protest [].”
+```{r}
+flock_df %>% 
+  filter(Search.Time == as.Date("2025-07-04"),
+         state_pd == "TX",
+         grepl("protest", Reason, ignore.case = TRUE)) %>% 
+  count()
+```
+On February 19, 2024, SPD officer Haley Radisic ran six searches on two license plates labeled “Palestinian Protest 02-19-2024.” 
+```{r}
+flock_df %>% 
+  filter(Search.Time == as.Date("2024-02-19"),
+         grepl("palestinian protest", Reason, ignore.case = TRUE)) 
+```
+
+On October 13, 2024, officer Olivia Malone ran two searches of one license plate, writing “protest” as the reason. 
+```{r}
+flock_df %>% 
+  filter(Search.Time == as.Date("2024-10-13"),
+         grepl("protest", Reason, ignore.case = TRUE)) 
+```
+
+# Appendix
+
+In combining these data from separate csv's, 
+```{r}
+na_list <- c("", "***", NA)
+
+flock_df %>% 
+  summarise(across(everything(), ~ sum(is.na(.))))
+  
+```
