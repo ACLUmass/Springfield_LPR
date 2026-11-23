@@ -1,0 +1,67 @@
+---
+title: "violent_crimes"
+output: html_document
+date: "2026-11-19"
+---
+
+# Environment setup + data cleaning
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(tidyr)
+library(plotly)
+library(htmlwidgets)
+library(ggiraph)
+library(patchwork)
+library(sf)
+
+source("./utils.R")
+```
+
+Here, we're removing the duplicates from our analysis.
+
+```{r}
+flock_df <- read.csv("../data/flock_combined_24-26.csv") %>% 
+  filter(duplicate_likely == FALSE) %>% 
+  select(-dup1_check,
+         -dup2_check,
+         -duplicate_likely)
+
+nrow(flock_df)
+```
+
+```{r}
+flock_df$Search.Time <- as.Date.character(flock_df$Search.Time, format="%Y-%m-%d")
+```
+
+
+# Filtering by Violent Crimes
+List of violent crimes that we used to generate a list: https://jackdiamondlaw.com/violent-crimes/
+
+```{r}
+VIOLENT_CRIMES <- "murder|homicide|manslaughter|domestic assault|battery|dangerous weapon|kidnap|arson"
+
+violent_df <- flock_df %>% 
+  filter(grepl(VIOLENT_CRIMES, Reason, ignore.case = TRUE))
+```
+
+```{r}
+percent_violent <- (nrow(violent_df) / nrow(flock_df)) * 100
+print(paste("% of Flock searches that were for violent crime: ", percent_violent))
+```
+
+## What about in 2025?
+
+```{r}
+violent_25 <- violent_df %>% 
+  filter(Search.Time >= as.Date("2025-01-01"),
+         Search.Time <= as.Date("2025-12-31"))
+```
+
+```{r}
+percent_violent <- (nrow(violent_25) / nrow(flock_df)) * 100
+print(paste("% of Flock searches that were for violent crime in 2025: ", percent_violent))
+```
+
