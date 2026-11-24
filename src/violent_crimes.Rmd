@@ -2,6 +2,9 @@
 title: "violent_crimes"
 output: html_document
 date: "2026-11-19"
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
 
 # Environment setup + data cleaning
@@ -36,32 +39,108 @@ nrow(flock_df)
 flock_df$Search.Time <- as.Date.character(flock_df$Search.Time, format="%Y-%m-%d")
 ```
 
-
 # Filtering by Violent Crimes
-List of violent crimes that we used to generate a list: https://jackdiamondlaw.com/violent-crimes/
+
+We have disaggregated the violent crimes into three different
+categories, namely violent crimes, weapons offenses, and violent
+descriptions. Below are the keywords that we used to find matches in the
+'Reason' column of the Flock audit logs. Note that we are doing an exact
+keyword match, which will exclude searches that are misspelled.
+
+*Violent Crimes*:
+
+- murder
+
+- homicide
+
+- manslaughter
+
+- concealment of a body
+
+- domestic
+
+- agg (to capture aggravated, agg assault, etc)
+
+- battery
+
+- A&B (for assault and battery)
+
+- ABDW (for assault and batter with a dangerous weapon)
+
+- kidnap
+
+- human trafficking
+
+- arson
+
+- rape
+
+- robbery
+
+- carjacking
+
+*Weapons Offenses*:
+
+- shots fired
+
+- shooting
+
+- weapon
+
+- armed
+
+- gun
+
+- firearm
+
+*Violent Description*: For these, note that
+
+- violent
+
+- violence
 
 ```{r}
-VIOLENT_CRIMES <- "murder|homicide|manslaughter|domestic assault|battery|dangerous weapon|kidnap|arson"
+VIOLENT_CRIMES <- "murder|homicide|manslaughter|concealment of a body|domestic|\\bagg|battery|kidnap|human trafficking|arson|\\ba&b\\b|\\babdw\\b|\\badw\\b|rape|robbery|carjacking"
+WEAPONS_OFFENSES <- "shots fired|shooting|weapon|armed|gun|firearm"
+VIOLENT_DESCR <- "violent|violence"
 
-violent_df <- flock_df %>% 
-  filter(grepl(VIOLENT_CRIMES, Reason, ignore.case = TRUE))
+# add the appropriate columns
+flock_df <- flock_df %>% 
+  mutate(violent_crimes = grepl(VIOLENT_CRIMES, Reason, ignore.case = TRUE),
+         weapons_crimes = grepl(WEAPONS_OFFENSES, Reason, ignore.case = TRUE),
+         violent_desc = grepl(VIOLENT_DESCR, Reason, ignore.case = TRUE),
+         all_violent = (violent_crimes | weapons_crimes | violent_desc))
 ```
 
 ```{r}
-percent_violent <- (nrow(violent_df) / nrow(flock_df)) * 100
-print(paste("% of Flock searches that were for violent crime: ", percent_violent))
+crime_stats <- flock_df %>% 
+                  select(violent_crimes,
+                         weapons_crimes,
+                         violent_desc,
+                         all_violent) %>% 
+                  summarize(violent_perc = round(100 * mean(violent_crimes), digits=1),
+                            weapons_perc = round(100 * mean(weapons_crimes), digits=1),
+                            violence_desc_perc = round(100 * mean(violent_desc), digits=1),
+                            all_percent = round(100 * mean(all_violent), digits=1))
 ```
 
-## What about in 2025?
-
 ```{r}
-violent_25 <- violent_df %>% 
+crime_stats <- flock_df %>% 
   filter(Search.Time >= as.Date("2025-01-01"),
-         Search.Time <= as.Date("2025-12-31"))
+         Search.Time <= as.Date("2025-12-31")) %>% 
+  summarize(violent_perc = round(100 * mean(violent_crimes), digits=1),
+            weapons_perc = round(100 * mean(weapons_crimes), digits=1),
+            violence_desc_perc = round(100 * mean(violent_desc), digits=1),
+            all_percent = round(100 * mean(all_violent), digits=1)) %>% 
+  rbind(crime_stats) %>% 
+  rename("Violent Crimes %" = violent_perc,
+         "Weapons %" = weapons_perc,
+         "Mention of Violence %" = violence_desc_perc,
+         "Any mention %" = all_percent)
+
+rownames(crime_stats) <- c("2025", "All Data")
 ```
 
 ```{r}
-percent_violent <- (nrow(violent_25) / nrow(flock_df)) * 100
-print(paste("% of Flock searches that were for violent crime in 2025: ", percent_violent))
+crime_stats
 ```
-
